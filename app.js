@@ -1,201 +1,246 @@
 const video = document.getElementById('webcam');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+const thinkingMode = document.getElementById('thinking-mode');
+const thinkingText = document.getElementById('thinking-text');
 
 let session = null;
 let infoDB = {};
-let currentBoxes = []; // 暂存当前帧的所有有效检测框数据
+let currentBoxes = []; 
 let isPaused = false;
 let currentSpeechText = "";
+let audioUnlocked = false; // iOS 语音解锁标记
 
-// 💥 重要配置：这儿的类名顺序必须和你的训练模型输出索引 (0, 1, 2...) 完全一致！
-const CLASS_NAMES = ["person", "bicycle", "car", "bottle"]; 
+let lastFrameTime = 0;
+const FPS_LIMIT = 8; 
+const MODEL_SIZE = 320;
+const offscreenCanvas = new OffscreenCanvas(MODEL_SIZE, MODEL_SIZE);
+const offscreenCtx = offscreenCanvas.getContext('2d');
 
-// 1. 系统初始化
+const CLASS_NAMES = [
+    "aeroplane", "bicycle", "bird", "boat", "bottle", 
+    "bus", "car", "cat", "chair", "cow", 
+    "diningtable", "dog", "horse", "motorbike", "person", 
+    "pottedplant", "sheep", "sofa", "train", "tvmonitor"
+]; 
+
+// iOS/Safari 语音强制解锁逻辑
+document.body.addEventListener('touchstart', () => {
+    if (!audioUnlocked) {
+        const dummyUtterance = new SpeechSynthesisUtterance('');
+        window.speechSynthesis.speak(dummyUtterance);
+        audioUnlocked = true;
+    }
+}, { once: true });
+
 async function init() {
     try {
-        console.log("正在加载本地字典配置...");
+        thinkingText.innerText = "加载离线数据库...";
         const res = await fetch('info_db.json');
         infoDB = await res.json();
-
-        console.log("正在初始化本地 ONNX 推理会话...");
-        // 自动启用 WebGL 硬件加速，性能拉满
-        session = await ort.InferenceSession.create('./yolov5_n.onnx', { executionProviders: ['webgl'] });
-        console.log("ONNX 引擎准备就绪！");
-
+        
+        thinkingText.innerText = "初始化 AI 模型 (首次需几秒)...";
+        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
+        session = await ort.InferenceSession.create('./yolov5_n.onnx', { executionProviders: ['wasm'] });
+        
         startCamera();
     } catch (e) {
-        alert("初始化失败，请检查模型或路径:\n" + e);
+        thinkingText.innerText = "初始化失败: " + e.message;
     }
 }
 
-// 2. 启动摄像头
 function startCamera() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        alert("您的浏览器不支持或禁用了摄像头访问权限！");
-        return;
-    }
-    
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+    thinkingText.innerText = "启动摄像头...";
+    // 强制限制分辨率，保护手机性能
+    const constraints = {
+        video: { 
+            facingMode: 'environment',
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+        }, 
+        audio: false 
+    };
+
+    navigator.mediaDevices.getUserMedia(constraints)
         .then(stream => {
             video.srcObject = stream;
             video.addEventListener('loadedmetadata', () => {
                 canvas.width = video.videoWidth;
                 canvas.height = video.videoHeight;
-                // 开启推理死循环
+                thinkingMode.style.display = 'none'; // 隐藏思考 UI
                 requestAnimationFrame(renderLoop);
             });
-        })
-        .catch(err => alert("无法打开摄像头，请确保提供了权限:\n" + err));
+        }).catch(err => {
+            thinkingText.innerText = "无法打开摄像头: " + err;
+        });
 }
 
-// 3. 推理与动态渲染主循环
-async function renderLoop() {
-    if (isPaused) return; // 拦截器：如果画面被冻结，直接切断刷新
+async function renderLoop(timestamp) {
+    if (isPaused) return;
 
-    // 在画布上同步绘制当前的视频帧
+    if (timestamp - lastFrameTime < (1000 / FPS_LIMIT)) {
+        requestAnimationFrame(renderLoop);
+        return;
+    }
+    lastFrameTime = timestamp;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     try {
-        // --- [数据预处理] ---
-        const imageTensor = Utils.preprocess(video, 320);
-
-        // --- [本地离线 AI 推理] ---
+        const imageTensor = Utils.preprocess(video, MODEL_SIZE);
         const feeds = { [session.inputNames[0]]: imageTensor };
         const outputs = await session.run(feeds);
 
-        // --- [后处理与映射还原] ---
         currentBoxes = Utils.postprocess(outputs, canvas.width, canvas.height);
 
-        // --- [绘制边界框] ---
         currentBoxes.forEach(box => {
-            // 绘制绿色矩形方框
             ctx.strokeStyle = '#00FF00';
             ctx.lineWidth = 3;
-            ctx.strokeRect(box.x1, box.y1, box.x2 - box.x1, box.y2 - box.y1);
+            ctx.strokeRect(box.x1, box.y1, box.w, box.h);
 
-            // 绘制标签背景和文字
-            ctx.fillStyle = '#00FF00';
+            ctx.fillStyle = 'rgba(0, 255, 0, 0.7)';
+            ctx.fillRect(box.x1, box.y1 - 25, ctx.measureText(box.label).width + 10, 25);
+            ctx.fillStyle = '#000000';
             ctx.font = 'bold 16px Arial';
-            ctx.fillText(box.label, box.x1, box.y1 - 6);
+            ctx.fillText(box.label, box.x1 + 5, box.y1 - 6);
         });
-
     } catch (err) {
         console.error("推理异常:", err);
     }
-
     requestAnimationFrame(renderLoop);
 }
 
-// 4. 触屏/鼠标点击碰撞检测 (完全复刻 Python 的基础数学区间判定)
 canvas.addEventListener('click', (e) => {
     if (isPaused) return;
-
-    // 计算出点击点在原始画布像素坐标系下的绝对坐标 (x, y)
     const rect = canvas.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * canvas.width;
-    const y = ((e.clientY - rect.top) / rect.height) * canvas.height;
+    // 修正 Canvas 缩放导致的坐标偏移
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
 
-    // 面积从小到大碰撞判定，防止大框套小框时无法精准选中
-    const sortedBoxes = [...currentBoxes].sort((a, b) => ((a.x2-a.x1)*(a.y2-a.y1)) - ((b.x2-b.x1)*(b.y2-b.y1)));
-
+    const sortedBoxes = [...currentBoxes].sort((a, b) => (a.w * a.h) - (b.w * b.h));
     for (let box of sortedBoxes) {
-        if (x >= box.x1 && x <= box.x2 && y >= box.y1 && y <= box.y2) {
-            console.log(`碰撞成功！选中目标: ${box.label}`);
+        if (x >= box.x1 && x <= box.x1 + box.w && y >= box.y1 && y <= box.y1 + box.h) {
             freezeAndOpenPopup(box.label);
             break; 
         }
     }
 });
 
-// 5. 冻结摄像头刷新与弹出百科卡片
 function freezeAndOpenPopup(label) {
     isPaused = true;
-    video.pause(); // 完美冻结镜头画面
-
+    video.pause(); 
     if (infoDB[label]) {
         currentSpeechText = infoDB[label].text;
         document.getElementById('modal-img').src = infoDB[label].image;
         document.getElementById('modal-text').innerText = infoDB[label].text;
-
         document.getElementById('overlay').style.display = 'block';
         document.getElementById('modal').style.display = 'block';
-        
-        // 自动触发一次无阻塞的朗读
         speakText();
     } else {
-        console.log(`提示：本地字典库中没有关于【${label}】的百科配置。`);
         closeModal();
     }
 }
 
-// 6. 浏览器级原生系统离线文字转语音 (无需额外安装任何笨重依赖)
 function speakText() {
     if (!currentSpeechText) return;
-    window.speechSynthesis.cancel(); // 强行截断上一句
-
+    window.speechSynthesis.cancel(); 
     const utterance = new SpeechSynthesisUtterance(currentSpeechText);
     utterance.lang = 'zh-CN';
-    utterance.rate = 0.95; // 稍微放慢语速，保证清晰
+    utterance.rate = 0.95; 
     window.speechSynthesis.speak(utterance);
 }
 
-// 7. 关闭弹窗并恢复运行
 function closeModal() {
-    window.speechSynthesis.cancel(); // 彻底关闭声音
+    window.speechSynthesis.cancel(); 
     document.getElementById('overlay').style.display = 'none';
     document.getElementById('modal').style.display = 'none';
-
-    // 解冻画面
     isPaused = false;
     video.play();
     requestAnimationFrame(renderLoop);
 }
 
-// 🧰 高性能矩阵转换辅助工具包
 const Utils = {
-    // 图像缩放与格式归一化 (RGB 格式排布)
     preprocess(videoSource, size) {
-        const canvasTemp = new OffscreenCanvas(size, size);
-        const ctxTemp = canvasTemp.getContext('2d');
-        ctxTemp.drawImage(videoSource, 0, 0, size, size);
+        offscreenCtx.drawImage(videoSource, 0, 0, size, size);
+        const pixelData = offscreenCtx.getImageData(0, 0, size, size).data;
+        const floatData = new Float32Array(3 * size * size);
         
-        const pixelData = ctxTemp.getImageData(0, 0, size, size).data;
-        const [rArray, gArray, bArray] = [[], [], []];
-
-        // 提取并做 1/255.0 归一化排布
-        for (let i = 0; i < pixelData.length; i += 4) {
-            rArray.push(pixelData[i] / 255.0);
-            gArray.push(pixelData[i + 1] / 255.0);
-            bArray.push(pixelData[i + 2] / 255.0);
+        for (let i = 0, j = 0; i < pixelData.length; i += 4, j++) {
+            floatData[j] = pixelData[i] / 255.0;
+            floatData[j + size * size] = pixelData[i + 1] / 255.0;
+            floatData[j + 2 * size * size] = pixelData[i + 2] / 255.0;
         }
-
-        const floatData = new Float32Array([...rArray, ...gArray, ...bArray]);
         return new ort.Tensor('float32', floatData, [1, 3, size, size]);
     },
-
-    // 结果张量格式深度解析与画布比例映射
     postprocess(outputs, canvasWidth, canvasHeight) {
-        // 获取模型的输出层数据
-        const outputTensor = outputs[Object.keys(outputs)[0]]; 
-        const data = outputTensor.data; 
-        
         let validBoxes = [];
-        const scoreThresh = 0.40; // 过滤置信度阈值
-        
-        // 注意：此处解析通常需要结合具体的模型输出维度排布进行循环遍历。
-        // 以下为解析骨架，运行时它会自动抓取满足高阈值的数据，转换格式输出给检测队列
-        // 最终返回格式必须是：[{ x1, y1, x2, y2, label: "类名" }]
-        
-        // 模拟高置信度返回示例（你模型输出的数据遍历过滤）：
-        /*
-        for(let i=0; i<total_proposals; i++) {
-             // 提取 x1, y1, x2, y2, score, cls_id ...
-             // 映射坐标：x1 = (x1 / 320) * canvasWidth ...
+        const CONF_THRESH = 0.45;
+        const scaleX = canvasWidth / MODEL_SIZE;
+        const scaleY = canvasHeight / MODEL_SIZE;
+
+        for (const key in outputs) {
+            const data = outputs[key].data;
+            const dims = outputs[key].dims; 
+            
+            if (dims.length === 3) {
+                const numProposals = dims[1];
+                const numAttrs = dims[2];
+                for (let i = 0; i < numProposals; i++) {
+                    const offset = i * numAttrs;
+                    const conf = data[offset + 4];
+                    if (conf < CONF_THRESH) continue;
+
+                    let maxClassProb = 0;
+                    let classId = -1;
+                    for (let c = 0; c < CLASS_NAMES.length; c++) {
+                        const prob = data[offset + 5 + c];
+                        if (prob > maxClassProb) { maxClassProb = prob; classId = c; }
+                    }
+
+                    const score = conf * maxClassProb;
+                    if (score > CONF_THRESH) {
+                        const cx = data[offset];
+                        const cy = data[offset + 1];
+                        const w = data[offset + 2];
+                        const h = data[offset + 3];
+                        
+                        validBoxes.push({
+                            x1: (cx - w / 2) * scaleX,
+                            y1: (cy - h / 2) * scaleY,
+                            w: w * scaleX,
+                            h: h * scaleY,
+                            score: score,
+                            label: CLASS_NAMES[classId]
+                        });
+                    }
+                }
+            }
         }
-        */
-        
-        return validBoxes;
+        return this.nms(validBoxes, 0.45);
+    },
+    nms(boxes, iouThresh) {
+        boxes.sort((a, b) => b.score - a.score);
+        const result = [];
+        while (boxes.length > 0) {
+            const bestBox = boxes.shift();
+            result.push(bestBox);
+            boxes = boxes.filter(box => this.iou(bestBox, box) < iouThresh);
+        }
+        return result;
+    },
+    iou(box1, box2) {
+        const xA = Math.max(box1.x1, box2.x1);
+        const yA = Math.max(box1.y1, box2.y1);
+        const xB = Math.min(box1.x1 + box1.w, box2.x1 + box2.w);
+        const yB = Math.min(box1.y1 + box1.h, box2.y1 + box2.h);
+        const interArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
+        const box1Area = box1.w * box1.h;
+        const box2Area = box2.w * box2.h;
+        return interArea / (box1Area + box2Area - interArea);
     }
 };
 
