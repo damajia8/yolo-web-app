@@ -1,6 +1,5 @@
-const CACHE_NAME = 'yolo-百科离线应用-v1';
+const CACHE_NAME = 'yolo-百科离线应用-v4';
 
-// 需要被强制打包并离线锁死到手机本地的文件清单
 const STATIC_ASSETS = [
     './',
     './index.html',
@@ -8,23 +7,31 @@ const STATIC_ASSETS = [
     './info_db.json',
     './yolov5_n.onnx',
     'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js',
+    'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort-wasm.wasm',
+    'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort-wasm-threaded.wasm',
+    // 确保这俩文件严格区分大小写，且在仓库真实存在！
     './images/person.jpg',
     './images/bottle.jpg'
 ];
 
-// 安装阶段：把上面清单里的所有大文件（包括ONNX模型、文字、网页、图片）全部拉取存进闪存
 self.addEventListener('install', event => {
-    console.log('[Service Worker] 正在执行安装，缓存数据中...');
     event.waitUntil(
         caches.open(CACHE_NAME).then(cache => {
-            return cache.addAll(STATIC_ASSETS);
+            // 使用 no-cors 模式缓存外部 CDN 资源，防止跨域报错中断整个缓存过程
+            return Promise.all(STATIC_ASSETS.map(url => {
+                const request = new Request(url, { mode: url.startsWith('http') ? 'no-cors' : 'cors' });
+                return fetch(request).then(response => {
+                    if (!response.ok && response.type !== 'opaque') {
+                        throw new Error(`资源请求失败: ${url}`);
+                    }
+                    return cache.put(request, response);
+                }).catch(err => console.warn('文件缓存跳过:', url, err));
+            }));
         }).then(() => self.skipWaiting())
     );
 });
 
-// 激活阶段：清理旧版本的多余缓存
 self.addEventListener('activate', event => {
-    console.log('[Service Worker] 激活成功，正在接管控制权...');
     event.waitUntil(
         caches.keys().then(keys => {
             return Promise.all(
@@ -38,14 +45,11 @@ self.addEventListener('activate', event => {
     );
 });
 
-// 拦截请求阶段：只要本地闪存里有，就绝不走流量和网络，做到100%纯离线
 self.addEventListener('fetch', event => {
     event.respondWith(
         caches.match(event.request).then(cachedResponse => {
-            if (cachedResponse) {
-                return cachedResponse; // 找到缓存，直接秒开返回
-            }
-            return fetch(event.request); // 缓存找不到（比如新外链），才走普通网络请求
+            if (cachedResponse) return cachedResponse; 
+            return fetch(event.request); 
         })
     );
 });
