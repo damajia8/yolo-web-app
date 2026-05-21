@@ -8,32 +8,35 @@
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #121212; overflow: hidden; width: 100vw; height: 100vh; position: relative; }
         
-        /* 视频与画布全屏无缝叠加 */
         #container { position: relative; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
         video { position: absolute; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
         canvas { position: absolute; width: 100%; height: 100%; object-fit: cover; z-index: 2; pointer-events: auto; }
         
-        /* 百科弹窗卡片 (复刻 Tkinter 界面) */
+        /* 思考/加载状态 UI */
+        #thinking-mode { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #121212; z-index: 99; display: flex; flex-direction: column; justify-content: center; align-items: center; color: #fff; transition: opacity 0.5s; }
+        .spinner { width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.3); border-top: 4px solid #3498db; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 15px; }
+        
         #modal { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 85%; max-width: 480px; background: #ffffff; border-radius: 16px; box-shadow: 0 20px 50px rgba(0,0,0,0.6); z-index: 10; padding: 20px; text-align: center; color: #333333; animation: fadeIn 0.2s ease-out; }
         #modal-img { width: 100%; max-height: 220px; object-fit: cover; border-radius: 10px; margin-bottom: 15px; background: #f0f0f0; }
         #modal-text { font-size: 16px; line-height: 1.6; text-align: left; max-height: 160px; overflow-y: auto; margin-bottom: 20px; white-space: pre-wrap; color: #444444; padding: 0 5px; }
         
-        /* 底部交互按钮 */
         .btn-group { display: flex; gap: 12px; justify-content: center; }
         button { padding: 12px 28px; border: none; border-radius: 8px; font-size: 15px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
         .btn-speak { background: #3498db; color: white; }
-        .btn-speak:active { background: #2980b9; }
         .btn-close { background: #e74c3c; color: white; }
-        .btn-close:active { background: #c0392b; }
         
-        /* 暗色半透明背景遮罩 */
         #overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.65); z-index: 9; }
         
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         @keyframes fadeIn { from { opacity: 0; transform: translate(-50%, -45%); } to { opacity: 1; transform: translate(-50%, -50%); } }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
 </head>
 <body>
+    <div id="thinking-mode">
+        <div class="spinner"></div>
+        <p id="thinking-text">AI 引擎加载中...</p>
+    </div>
 
     <div id="container">
         <video id="webcam" autoplay playsinline muted></video>
@@ -52,12 +55,11 @@
 
     <script src="app.js"></script>
     <script>
-        // 注册浏览器离线守卫 Service Worker
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
                 navigator.serviceWorker.register('service-worker.js')
-                    .then(reg => console.log('Service Worker 注册成功，离线数据已就绪:', reg.scope))
-                    .catch(err => console.log('Service Worker 注册失败:', err));
+                    .then(reg => console.log('SW 注册成功'))
+                    .catch(err => console.log('SW 注册失败', err));
             });
         }
     </script>
