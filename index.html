@@ -3,65 +3,196 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>离线智能识物百科 App</title>
+    <title>YOLOv5 电子元件智能识别系统</title>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/onnxruntime-web/1.14.0/ort.min.js"></script>
+    
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #121212; overflow: hidden; width: 100vw; height: 100vh; position: relative; }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #121212;
+            color: #e0e0e0;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            font-size: 1.4rem;
+            margin-bottom: 5px;
+            color: #00FF00;
+            text-shadow: 0 0 10px rgba(0,255,0,0.2);
+            text-align: center;
+        }
+
+        .subtitle {
+            font-size: 0.85rem;
+            color: #888;
+            margin-bottom: 15px;
+            text-align: center;
+        }
+
+        /* 核心修正：构建绝对定位的父级上下文，确保 Canvas 与 Video 物理尺寸及坐标完美重合 */
+        .camera-container {
+            position: relative;
+            width: 100%;
+            max-width: 500px;
+            background-color: #000;
+            border: 2px solid #333;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }
+
+        #camera-stream {
+            width: 100%;
+            height: auto;
+            display: block;
+            object-fit: cover;
+        }
+
+        /* 核心修正：Canvas 绝对定位死死覆盖在视频正上方，z-index 确保能接收手机 Touch 事件 */
+        #detection-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            touch-action: none; /* 阻止手机端的默认手势干扰 */
+        }
+
+        .button-group {
+            display: flex;
+            gap: 12px;
+            width: 100%;
+            max-width: 500px;
+            margin-top: 15px;
+        }
+
+        button {
+            flex: 1;
+            padding: 12px;
+            font-size: 1rem;
+            font-weight: bold;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        #start-btn {
+            background-color: #00FF00;
+            color: #000;
+        }
+
+        #start-btn:disabled {
+            background-color: #1e3d1e;
+            color: #666;
+            cursor: not-allowed;
+        }
+
+        #stop-btn {
+            background-color: #ff3b30;
+            color: #fff;
+        }
+
+        #stop-btn:disabled {
+            background-color: #3d1e1e;
+            color: #666;
+            cursor: not-allowed;
+        }
+
+        #loading {
+            width: 100%;
+            max-width: 500px;
+            text-align: center;
+            padding: 12px;
+            margin-top: 10px;
+            background-color: #1a1a1a;
+            border: 1px dashed #00FF00;
+            color: #00FF00;
+            border-radius: 8px;
+            font-size: 0.9rem;
+        }
+
+        .result-panel {
+            width: 100%;
+            max-width: 500px;
+            margin-top: 20px;
+            background-color: #1a1a1a;
+            padding: 15px;
+            border-radius: 12px;
+            border: 1px solid #333;
+        }
+
+        .result-panel h3 {
+            font-size: 1rem;
+            margin-bottom: 10px;
+            color: #fff;
+            border-bottom: 1px solid #333;
+            padding-bottom: 5px;
+        }
+
+        #result-list {
+            list-style: none;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+
+        /* 手机端列表卡片美化，增大触控条目面积 */
+        .result-item {
+            background-color: #262626 !important;
+            color: #fff !important;
+            border-left: 4px solid #00FF00 !important;
+            padding: 12px !important;
+            margin-bottom: 8px !important;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
         
-        #container { position: relative; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
-        video { position: absolute; width: 100%; height: 100%; object-fit: cover; z-index: 1; }
-        canvas { position: absolute; width: 100%; height: 100%; object-fit: cover; z-index: 2; pointer-events: auto; }
-        
-        /* 思考/加载状态 UI */
-        #thinking-mode { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #121212; z-index: 99; display: flex; flex-direction: column; justify-content: center; align-items: center; color: #fff; transition: opacity 0.5s; }
-        .spinner { width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.3); border-top: 4px solid #3498db; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 15px; }
-        
-        #modal { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 85%; max-width: 480px; background: #ffffff; border-radius: 16px; box-shadow: 0 20px 50px rgba(0,0,0,0.6); z-index: 10; padding: 20px; text-align: center; color: #333333; animation: fadeIn 0.2s ease-out; }
-        #modal-img { width: 100%; max-height: 220px; object-fit: cover; border-radius: 10px; margin-bottom: 15px; background: #f0f0f0; }
-        #modal-text { font-size: 16px; line-height: 1.6; text-align: left; max-height: 160px; overflow-y: auto; margin-bottom: 20px; white-space: pre-wrap; color: #444444; padding: 0 5px; }
-        
-        .btn-group { display: flex; gap: 12px; justify-content: center; }
-        button { padding: 12px 28px; border: none; border-radius: 8px; font-size: 15px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
-        .btn-speak { background: #3498db; color: white; }
-        .btn-close { background: #e74c3c; color: white; }
-        
-        #overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.65); z-index: 9; }
-        
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        @keyframes fadeIn { from { opacity: 0; transform: translate(-50%, -45%); } to { opacity: 1; transform: translate(-50%, -50%); } }
+        .result-item::after {
+            content: "详情 ➔";
+            font-size: 0.75rem;
+            color: #00FF00;
+        }
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
 </head>
 <body>
-    <div id="thinking-mode">
-        <div class="spinner"></div>
-        <p id="thinking-text">AI 引擎加载中...</p>
+
+    <h1>ELECTRONIC COMPONENT AI</h1>
+    <div class="subtitle">手机端专版：框内或下方列表点击标签可跳转详情</div>
+
+    <div class="camera-container">
+        <video id="camera-stream" autoplay playsinline webkit-playsinline muted></video>
+        <canvas id="detection-canvas"></canvas>
     </div>
 
-    <div id="container">
-        <video id="webcam" autoplay playsinline muted></video>
-        <canvas id="canvas"></canvas>
+    <div id="loading">正在加载核心标签库与 AI 识别模型...</div>
+
+    <div class="button-group">
+        <button id="start-btn" disabled>开启识别相机</button>
+        <button id="stop-btn" disabled>暂停服务</button>
     </div>
 
-    <div id="overlay"></div>
-    <div id="modal">
-        <img id="modal-img" src="" alt="百科图片">
-        <div id="modal-text"></div>
-        <div class="btn-group">
-            <button class="btn-speak" onclick="speakText()">🔊 朗读介绍</button>
-            <button class="btn-close" onclick="closeModal()">关闭</button>
-        </div>
+    <div class="result-panel">
+        <h3>实时检测结果面板</h3>
+        <ul id="result-list">
+            <li style="color:#666; text-align:center; padding: 10px; list-style: none;">等待相机开启...</li>
+        </ul>
     </div>
 
-    <script src="app.js"></script>
-    <script>
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', () => {
-                navigator.serviceWorker.register('service-worker.js')
-                    .then(reg => console.log('SW 注册成功'))
-                    .catch(err => console.log('SW 注册失败', err));
-            });
-        }
-    </script>
+    <script src="./app.js"></script>
 </body>
 </html>
