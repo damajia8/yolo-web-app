@@ -2,15 +2,14 @@
 // 1. 核心配置与全局变量
 // ============================================================================
 
-// 解决 GitHub Pages 上 ort-wasm-simd.wasm 404 找不到的经典巨坑
-// 强行将 WASM 依赖重定向至官方权威的 cdnjs 镜像（版本保持与 1.14.0 一致）
+// 解决手机端/GitHub Pages 上 WASM 文件 404 及加载失败的巨坑
 ort.env.wasm.wasmPaths = "https://cdnjs.cloudflare.com/ajax/libs/onnxruntime-web/1.14.0/";
 
 let modelSession = null;
 let labels = [];
-const modelInputSize = 640; // YOLOv5n 默认输入尺寸为 640x640
+const modelInputSize = 640; // YOLOv5n 默认输入尺寸
 
-// 页面 DOM 元素获取
+// 页面 DOM 元素
 const videoElement = document.getElementById('camera-stream');
 const canvasElement = document.getElementById('detection-canvas');
 const ctx = canvasElement.getContext('2d');
@@ -21,51 +20,52 @@ const resultList = document.getElementById('result-list');
 
 let animationFrameId = null;
 let isRunning = false;
+let currentDetections = []; // 存储当前帧检测到的所有框，用于点击判定
 
 // ============================================================================
 // 2. 初始化与资源加载
 // ============================================================================
 
-// 异步加载 info_db.txt 中的标签数据
+// 异步加载标签数据
 async function loadLabels() {
     try {
-        // 修复路径：从绝对路径 '/info_db.txt' 改为相对路径 './info_db.txt'
-        // 确保在 GitHub Pages 的二级目录下也能被正确 fetch 到
         const response = await fetch('./info_db.txt');
-        if (!response.ok) {
-            throw new Error(`无法获取标签文件，HTTP 状态码: ${response.status}`);
-        }
+        if (!response.ok) throw new Error(`HTTP 状态码: ${response.status}`);
         const text = await response.text();
-        
-        // 按行解析，过滤掉空行
-        labels = text.split('\n')
-            .map(line => line.trim())
-            .filter(line => line.length > 0);
-            
-        console.log(`[成功] 成功加载 ${labels.length} 个类别标签`);
+        labels = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+        console.log(`[成功] 加载了 ${labels.length} 个标签`);
     } catch (error) {
-        console.error("[错误] 加载标签文件失败:", error);
-        alert("组件标签库加载失败，请刷新页面重试！\n原因: " + error.message);
+        console.error("加载标签失败:", error);
     }
 }
 
-// 异步加载 YOLOv5 目标检测模型
+// 异步加载 YOLOv5 模型（手机端强力兼容版）
 async function loadModel() {
     loadingElement.style.display = 'block';
-    loadingElement.textContent = '正在下载并加载 YOLO 神经网络模型，请稍候...';
+    loadingElement.textContent = '神经网络正载入手机内存，请稍候...';
     
+    // 策略一：尝试 WebGL
     try {
-        console.log("[启动] 开始初始化 ONNX Runtime 推理会话...");
-        // 初始化模型会话，默认使用 webgl 加速，若不支持会自动降级
-        modelSession = await ort.InferenceSession.create('./yolov5_n.onnx', {
-            executionProviders: ['webgl', 'wasm']
-        });
-        console.log("[成功] YOLO 模型成功载入，输入/输出节点已就绪", modelSession);
+        console.log("尝试使用 WebGL 模式...");
+        modelSession = await ort.InferenceSession.create('./yolov5_n.onnx', { executionProviders: ['webgl'] });
+        console.log("WebGL 初始化成功");
+        loadingElement.style.display = 'none';
+        startBtn.disabled = false;
+        return;
+    } catch (e) {
+        console.warn("手机不支持 WebGL，准备切换至 WASM 兼容模式...", e);
+    }
+
+    // 策略二：绝对兼容的 WASM 纯 CPU 模式
+    try {
+        console.log("尝试使用 WASM 模式...");
+        modelSession = await ort.InferenceSession.create('./yolov5_n.onnx', { executionProviders: ['wasm'] });
+        console.log("WASM 初始化成功");
         loadingElement.style.display = 'none';
         startBtn.disabled = false;
     } catch (error) {
-        console.error("[严重错误] 无法实例化 ONNX 模型:", error);
-        loadingElement.innerHTML = `<span style="color:red;">模型加载失败：${error.message}<br>请检查网络或更换现代浏览器（推荐 Chrome/Edge）</span>`;
+        console.error("所有推理引擎均在手机端崩溃:", error);
+        loadingElement.innerHTML = `<span style="color:red;">手机加载失败: ${error.message}</span>`;
     }
 }
 
@@ -75,7 +75,7 @@ async function loadModel() {
 
 async function startCamera() {
     try {
-        // 请求调用后置摄像头，如果不可用则拉取默认设备
+        // 强制调用手机后置环境摄像头
         const stream = await navigator.mediaDevices.getUserMedia({
             video: {
                 facingMode: 'environment', 
@@ -88,124 +88,85 @@ async function startCamera() {
         videoElement.srcObject = stream;
         await videoElement.play();
         
-        // 动态调整 Canvas 画布大小以匹配摄像头的实际物理输出分辨率
+        // 让 Canvas 的画布分辨率与手机获取到的摄像头像素完全对齐
         canvasElement.width = videoElement.videoWidth;
         canvasElement.height = videoElement.videoHeight;
         
-        console.log(`[相机] 视频流已启动。实际分辨率: ${videoElement.videoWidth}x${videoElement.videoHeight}`);
         return true;
     } catch (error) {
-        console.error("[相机错误] 无法获取摄像头权限:", error);
-        alert("摄像头开启失败，请确保授予了网页相机权限！\n细节: " + error.message);
+        alert("手机相机权限获取失败，请确保使用 HTTPS 访问并允许了相机权限！");
         return false;
     }
 }
 
 function stopCamera() {
     if (videoElement.srcObject) {
-        const stream = videoElement.srcObject;
-        const tracks = stream.getTracks();
-        tracks.forEach(track => track.stop());
+        videoElement.srcObject.getTracks().forEach(track => track.stop());
         videoElement.srcObject = null;
-        console.log("[相机] 摄像头数据流已关闭");
     }
 }
 
 // ============================================================================
-// 4. 核心图像预处理 (Image Preprocessing)
+// 4. 图像预处理与推理
 // ============================================================================
 
-/**
- * 将 Canvas 或 Video 帧图像转化为符合 YOLOv5 标准输入的 Float32Array
- * YOLOv5 期望格式: [1, 3, 640, 640]，且像素值进行归一化 (0.0 至 1.0)
- */
 function preprocess(video, targetWidth, targetHeight) {
-    // 建立临时的离屏 Canvas 来将图像规整缩放到 640x640
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = targetWidth;
     tempCanvas.height = targetHeight;
     const tempCtx = tempCanvas.getContext('2d');
-    
-    // 强制拉伸/缩放到 640x640 
     tempCtx.drawImage(video, 0, 0, targetWidth, targetHeight);
-    const imageData = tempCtx.getImageData(0, 0, targetWidth, targetHeight);
-    const data = imageData.data; // 格式为 RGBA, RGBA...
     
-    // 构造 [3, 640, 640] 的一维展开 Float32 数组 (平面格式: 全R, 全G, 全B)
+    const data = tempCtx.getImageData(0, 0, targetWidth, targetHeight).data;
     const floatData = new Float32Array(3 * targetWidth * targetHeight);
     const imageSize = targetWidth * targetHeight;
     
     for (let i = 0; i < imageSize; i++) {
-        // 归一化并分别填入 R、G、B 对应的平面空间
         floatData[i] = data[i * 4] / 255.0;               // R
         floatData[i + imageSize] = data[i * 4 + 1] / 255.0;   // G
         floatData[i + imageSize * 2] = data[i * 4 + 2] / 255.0; // B
     }
-    
-    // 打包封装成 ONNX Runtime 专用的 Tensor 对象
     return new ort.Tensor('float32', floatData, [1, 3, targetWidth, targetHeight]);
 }
 
-// ============================================================================
-// 5. 模型推理与后处理 (Inference & Postprocessing)
-// ============================================================================
-
 async function detectionLoop() {
     if (!isRunning) return;
-    
     try {
-        // 1. 采集当前帧并进行矩阵预处理
         const inputTensor = preprocess(videoElement, modelInputSize, modelInputSize);
-        
-        // 2. 喂入网络执行前向传播推理
-        // 注意：标准 YOLOv5 的输入节点通常名为 'images'
-        const feeds = { images: inputTensor };
-        const outputMap = await modelSession.run(feeds);
-        
-        // 获取主输出节点的推理矩阵数据
+        const outputMap = await modelSession.run({ images: inputTensor });
         const outputTensor = outputMap[modelSession.outputNames[0]];
-        const outputData = outputTensor.data; 
-        const outputDims = outputTensor.dims; // 通常结构为 [1, 25200, 85] (其中 85 = 4坐标 + 1置信度 + 80个类别概率)
-
-        // 3. 解析模型输出数据并渲染画布
-        postprocessAndRender(outputData, outputDims);
         
+        postprocessAndRender(outputTensor.data, outputTensor.dims);
     } catch (error) {
-        console.error("[推理崩溃] 检测循环被迫中止:", error);
+        console.error("帧处理失败:", error);
     }
-    
-    // 持续追踪下一帧画面
     if (isRunning) {
         animationFrameId = requestAnimationFrame(detectionLoop);
     }
 }
 
-/**
- * 后处理：解析原始 Tensor 输出，过滤低置信度框，并绘制到屏幕上
- */
+// ============================================================================
+// 5. 后处理与画框渲染（包含手机点击事件支持）
+// ============================================================================
+
 function postprocessAndRender(data, dims) {
-    // 擦除上一帧的画布内容，保持画面同步
     ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
     
-    const numBoxes = dims[1];   // 25200 个锚框
-    const numAttributes = dims[2]; // 每个框有 85 个特征属性
-    
-    const confThreshold = 0.40;  // 目标边界置信度阈值 (可调)
+    const numBoxes = dims[1];
+    const numAttributes = dims[2];
+    const confThreshold = 0.35; // 置信度阈值
     const activeDetections = [];
     
-    // 当前画面宽高的缩放因子 (用于将 640x640 的预测坐标映射回真实显示尺寸)
     const scaleX = canvasElement.width / modelInputSize;
     const scaleY = canvasElement.height / modelInputSize;
     
     for (let i = 0; i < numBoxes; i++) {
         const offset = i * numAttributes;
-        const boxConfidence = data[offset + 4]; // 第 4 位表示是否有物体的置信度
+        const boxConfidence = data[offset + 4];
         
         if (boxConfidence > confThreshold) {
-            // 提取 80 个类别的条件概率，寻找到最可能的那一项
             let maxClassScore = 0;
             let classId = -1;
-            
             for (let j = 5; j < numAttributes; j++) {
                 if (data[offset + j] > maxClassScore) {
                     maxClassScore = data[offset + j];
@@ -213,17 +174,13 @@ function postprocessAndRender(data, dims) {
                 }
             }
             
-            // 综合评分 = 框置信度 * 类别概率
             const finalScore = boxConfidence * maxClassScore;
-            
             if (finalScore > confThreshold) {
-                // YOLOv5 输出格式为：中心点cx, 中心点cy, 宽度w, 高度h
                 const cx = data[offset + 0];
                 const cy = data[offset + 1];
                 const w = data[offset + 2];
                 const h = data[offset + 3];
                 
-                // 转换为左上角坐标 (x, y) 形式并进行画面映射
                 const x = (cx - w / 2) * scaleX;
                 const y = (cy - h / 2) * scaleY;
                 const rectW = w * scaleX;
@@ -233,66 +190,103 @@ function postprocessAndRender(data, dims) {
                     x, y, w: rectW, h: rectH,
                     score: finalScore,
                     classId: classId,
-                    label: labels[classId] || `未知电子元件(ID:${classId})`
+                    label: labels[classId] || `元件(ID:${classId})`
                 });
             }
         }
     }
     
-    // 简易非极大值抑制 (NMS)，防止同一个电子元件上画出一堆重叠的重复框
-    const finalBoxes = simpleNMS(activeDetections, 0.45);
-    
-    // 清空上一次的右侧文本列表
+    // 执行 NMS 并保存到全局变量中供点击检测使用
+    currentDetections = simpleNMS(activeDetections, 0.45);
     resultList.innerHTML = '';
     
-    // 开始在 Canvas 上绘制最终的定位框和类别标签文本
-    finalBoxes.forEach(box => {
-        // 绘制矩形边框
-        ctx.strokeStyle = '#00FF00'; // 经典科技绿
-        ctx.lineWidth = 3;
+    currentDetections.forEach(box => {
+        // 1. 绘制矩形选框
+        ctx.strokeStyle = '#00FF00';
+        ctx.lineWidth = 4;
         ctx.strokeRect(box.x, box.y, box.w, box.h);
         
-        // 绘制标签背景板
-        ctx.fillStyle = 'rgba(0, 255, 0, 0.75)';
-        const textStr = `${box.label} (${(box.score * 100).toFixed(1)}%)`;
-        ctx.font = 'bold 16px Arial';
+        // 2. 绘制交互标签头（增大手机端触控视觉面积）
+        const textStr = `👉 ${box.label} [点击了解]`;
+        ctx.font = 'bold 18px Arial';
         const textWidth = ctx.measureText(textStr).width;
-        ctx.fillRect(box.x, box.y - 25, textWidth + 10, 25);
         
-        // 绘制文本
-        ctx.fillStyle = '#000000'; // 黑色字体
-        ctx.fillText(textStr, box.x + 5, box.y - 7);
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.85)';
+        // 存储标签的理论物理点击区域 (用于判定点击事件)
+        box.labelArea = { x: box.x, y: box.y - 32, w: textWidth + 16, h: 32 };
+        ctx.fillRect(box.labelArea.x, box.labelArea.y, box.labelArea.w, box.labelArea.h);
         
-        // 同步更新至右侧结果卡片面板
+        // 3. 填入文字
+        ctx.fillStyle = '#000000';
+        ctx.fillText(textStr, box.x + 8, box.y - 10);
+        
+        // 4. 同步生成下方的文本结果卡片（手机点击这个卡片也能跳转）
         const li = document.createElement('li');
         li.className = 'result-item';
-        li.innerHTML = `<strong>检测到：</strong> <span class="component-name">${box.label}</span> 
-                        <br> <strong>可靠度：</strong> ${(box.score * 100).toFixed(1)}%`;
+        li.style.borderLeft = "5px solid #00FF00";
+        li.style.padding = "8px";
+        li.style.marginBottom = "5px";
+        li.style.backgroundColor = "#f0f0f0";
+        li.innerHTML = `<strong>名称：</strong> <span style="color:#008c00;">${box.label}</span> (点击跳转介绍)`;
+        // 为下方的列表项绑定相同的跳转
+        li.onclick = () => handleLabelRedirect(box.label);
         resultList.appendChild(li);
     });
 }
 
-/**
- * 简易 NMS (Non-Maximum Suppression) 算法实现
- */
+// 统一的跳转处理函数
+function handleLabelRedirect(labelName) {
+    // 停止检测循环，防止弹窗或跳转后手机端卡死
+    stopBtn.click();
+    
+    // 根据识别到的标签名字，拼接你想要的跳转目标（如百度百科、国内电子元件库网等）
+    // 你可以把这里的 URL 改成你任何想去的地方
+    const targetUrl = `https://baike.baidu.com/item/${encodeURIComponent(labelName)}`;
+    
+    alert(`即将离开本应用，前往了解：${labelName}`);
+    window.location.href = targetUrl;
+}
+
+// 监听手机屏幕上的 Canvas 点击（触摸）事件
+canvasElement.addEventListener('touchstart', (event) => {
+    // 阻止默认的缩放行为
+    event.preventDefault();
+    
+    // 获取手机触屏相对 Canvas 画布的真实物理坐标
+    const rect = canvasElement.getBoundingClientRect();
+    const touch = event.touches[0];
+    const clickX = ((touch.clientX - rect.left) / rect.width) * canvasElement.width;
+    const clickY = ((touch.clientY - rect.top) / rect.height) * canvasElement.height;
+    
+    // 遍历当前帧的所有检测框，判断手指点中了哪一个
+    for (let box of currentDetections) {
+        // 情况一：点中了绿色的标签文字区域
+        if (box.labelArea && 
+            clickX >= box.labelArea.x && clickX <= box.labelArea.x + box.labelArea.w &&
+            clickY >= box.labelArea.y && clickY <= box.labelArea.y + box.labelArea.h) {
+            handleLabelRedirect(box.label);
+            return;
+        }
+        // 情况二：直接点中了识别框内部
+        if (clickX >= box.x && clickX <= box.x + box.w &&
+            clickY >= box.y && clickY <= box.y + box.h) {
+            handleLabelRedirect(box.label);
+            return;
+        }
+    }
+}, { passive: false });
+
+// NMS 算法核心
 function simpleNMS(boxes, iouThreshold) {
-    // 依照置信度降序排列
     boxes.sort((a, b) => b.score - a.score);
     const picked = [];
     const suppressed = new Array(boxes.length).fill(false);
-    
     for (let i = 0; i < boxes.length; i++) {
         if (suppressed[i]) continue;
         picked.push(boxes[i]);
-        
         for (let j = i + 1; j < boxes.length; j++) {
             if (suppressed[j]) continue;
-            
-            // 计算交并比 IoU
-            const iou = calculateIoU(boxes[i], boxes[j]);
-            if (iou > iouThreshold) {
-                suppressed[j] = true; // 重合度过高，剔除该低分框
-            }
+            if (calculateIoU(boxes[i], boxes[j]) > iouThreshold) suppressed[j] = true;
         }
     }
     return picked;
@@ -303,52 +297,35 @@ function calculateIoU(boxA, boxB) {
     const yA = Math.max(boxA.y, boxB.y);
     const xB = Math.min(boxA.x + boxA.w, boxB.x + boxB.w);
     const yB = Math.min(boxA.y + boxA.h, boxB.y + boxB.h);
-    
     const interArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
-    const boxAArea = boxA.w * boxA.h;
-    const boxBArea = boxB.w * boxB.h;
-    
-    return interArea / (boxAArea + boxBArea - interArea);
+    return interArea / (boxA.w * boxA.h + boxB.w * boxB.h - interArea);
 }
 
 // ============================================================================
-// 6. 事件绑定与生命周期
+// 6. 生命周期绑定
 // ============================================================================
 
 startBtn.addEventListener('click', async () => {
     if (isRunning) return;
-    
-    const cameraReady = await startCamera();
-    if (cameraReady) {
+    if (await startCamera()) {
         isRunning = true;
         startBtn.disabled = true;
         stopBtn.disabled = false;
-        // 激活帧循环检测逻辑
         animationFrameId = requestAnimationFrame(detectionLoop);
-        console.log("[系统] 目标检测引擎已正式启动");
     }
 });
 
 stopBtn.addEventListener('click', () => {
     if (!isRunning) return;
-    
     isRunning = false;
     startBtn.disabled = false;
     stopBtn.disabled = true;
-    
-    // 取消动画帧追踪，终止循环
-    if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-    }
-    
+    if (animationFrameId) cancelAnimationFrame(animationFrameId);
     stopCamera();
-    // 擦除画布留白
     ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
-    resultList.innerHTML = '<li style="color:#aaa; text-align:center;">服务已暂停</li>';
-    console.log("[系统] 目标检测引擎已成功挂起暂停");
+    resultList.innerHTML = '<li style="color:#aaa;text-align:center;">服务已暂停</li>';
 });
 
-// 页面加载完成后自动触发流水线：先读取元数据标签，后拉取并初始化深度学习模型
 window.addEventListener('DOMContentLoaded', async () => {
     startBtn.disabled = true;
     stopBtn.disabled = true;
